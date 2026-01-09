@@ -1,0 +1,208 @@
+-- ============================================
+-- AdTech Practice Dataset - Table Creation
+-- Platform: BigQuery (with T-SQL notes)
+-- Total Records: ~5000+ across all tables
+-- ============================================
+
+-- TABLE 1: ads_txt (Ad Inventory Data)
+-- Contains information about authorized digital sellers
+CREATE OR REPLACE TABLE `project.dataset.ads_txt` AS
+WITH base_ads AS (
+  SELECT 
+    GENERATE_UUID() AS ad_id,
+    domain,
+    seller_account_id,
+    account_type,
+    certification_authority,
+    relationship_type,
+    status
+  FROM UNNEST([
+    STRUCT('publisher1.com' AS domain, 'pub-123456' AS seller_account_id, 'DIRECT' AS account_type, 'google.com' AS certification_authority, 'direct' AS relationship_type, 'active' AS status),
+    STRUCT('publisher2.com', 'pub-789012', 'RESELLER', 'google.com', 'reseller', 'active'),
+    STRUCT('publisher3.com', 'pub-345678', 'DIRECT', 'appnexus.com', 'direct', 'active'),
+    STRUCT('publisher4.com', 'pub-901234', 'RESELLER', 'rubiconproject.com', 'reseller', 'inactive'),
+    STRUCT('publisher5.com', 'pub-567890', 'DIRECT', 'google.com', 'direct', 'active')
+  ]),
+  UNNEST(GENERATE_ARRAY(1, 200)) AS row_num
+)
+SELECT * FROM base_ads;
+
+-- T-SQL Note: Use NEWID() instead of GENERATE_UUID(), and cross join with number table instead of GENERATE_ARRAY
+
+-- TABLE 2: campaign_performance (Campaign Metrics)
+CREATE OR REPLACE TABLE `project.dataset.campaign_performance` AS
+WITH date_spine AS (
+  SELECT DATE_SUB(CURRENT_DATE(), INTERVAL day DAY) AS date
+  FROM UNNEST(GENERATE_ARRAY(1, 90)) AS day
+),
+campaigns AS (
+  SELECT 
+    campaign_id,
+    campaign_name,
+    advertiser_id,
+    campaign_type,
+    status
+  FROM UNNEST([
+    STRUCT('camp_001' AS campaign_id, 'Summer Sale 2024' AS campaign_name, 'adv_100' AS advertiser_id, 'Display' AS campaign_type, 'active' AS status),
+    STRUCT('camp_002', 'Black Friday Promo', 'adv_101', 'Video', 'active'),
+    STRUCT('camp_003', 'Product Launch Q1', 'adv_102', 'Search', 'active'),
+    STRUCT('camp_004', 'Brand Awareness', 'adv_100', 'Display', 'paused'),
+    STRUCT('camp_005', 'Retargeting Campaign', 'adv_103', 'Display', 'active'),
+    STRUCT('camp_006', 'Holiday Special', 'adv_101', 'Video', 'active'),
+    STRUCT('camp_007', 'Spring Collection', 'adv_104', 'Native', 'active'),
+    STRUCT('camp_008', 'Clearance Sale', 'adv_102', 'Display', 'completed'),
+    STRUCT('camp_009', 'New Year Blast', 'adv_105', 'Video', 'active'),
+    STRUCT('camp_010', 'Weekend Flash Sale', 'adv_100', 'Display', 'active')
+  ])
+)
+SELECT 
+  CONCAT(c.campaign_id, '_', FORMAT_DATE('%Y%m%d', d.date)) AS performance_id,
+  c.campaign_id,
+  c.campaign_name,
+  c.advertiser_id,
+  c.campaign_type,
+  c.status,
+  d.date AS performance_date,
+  CAST(1000 + RAND() * 50000 AS INT64) AS impressions,
+  CAST(10 + RAND() * 2000 AS INT64) AS clicks,
+  CAST(0 + RAND() * 50 AS INT64) AS conversions,
+  ROUND(50 + RAND() * 500, 2) AS revenue,
+  ROUND(20 + RAND() * 300, 2) AS cost,
+  CASE WHEN RAND() > 0.9 THEN NULL ELSE ROUND(RAND() * 100, 2) END AS quality_score
+FROM campaigns c
+CROSS JOIN date_spine d
+WHERE RAND() > 0.1;  -- 90% data availability
+
+-- T-SQL Note: Use CROSS JOIN with dates table, NEWID() for randomization, CONVERT for date formatting
+
+-- TABLE 3: programmatic_delivery (Ad Delivery Data)
+CREATE OR REPLACE TABLE `project.dataset.programmatic_delivery` AS
+WITH delivery_records AS (
+  SELECT 
+    GENERATE_UUID() AS delivery_id,
+    campaign_id,
+    ad_format,
+    device_type,
+    geo_region,
+    delivery_status,
+    date,
+    impressions_delivered,
+    impressions_requested
+  FROM UNNEST([
+    STRUCT('camp_001' AS campaign_id, 'Banner' AS ad_format, 'Desktop' AS device_type, 'US-CA' AS geo_region, 'successful' AS delivery_status),
+    STRUCT('camp_002', 'Video', 'Mobile', 'US-NY', 'successful'),
+    STRUCT('camp_003', 'Native', 'Tablet', 'US-TX', 'failed'),
+    STRUCT('camp_004', 'Banner', 'Desktop', 'US-FL', 'successful'),
+    STRUCT('camp_005', 'Interstitial', 'Mobile', 'US-WA', 'successful'),
+    STRUCT('camp_006', 'Video', 'Desktop', 'US-IL', 'partial'),
+    STRUCT('camp_007', 'Banner', 'Mobile', 'US-PA', 'successful'),
+    STRUCT('camp_008', 'Native', 'Desktop', 'US-OH', 'successful'),
+    STRUCT('camp_009', 'Video', 'Mobile', 'US-GA', 'failed'),
+    STRUCT('camp_010', 'Banner', 'Tablet', 'US-NC', 'successful')
+  ]),
+  UNNEST(GENERATE_ARRAY(1, 150)) AS day_offset
+)
+SELECT 
+  delivery_id,
+  campaign_id,
+  ad_format,
+  device_type,
+  geo_region,
+  delivery_status,
+  DATE_SUB(CURRENT_DATE(), INTERVAL day_offset DAY) AS date,
+  CAST(500 + RAND() * 10000 AS INT64) AS impressions_delivered,
+  CAST(1000 + RAND() * 15000 AS INT64) AS impressions_requested,
+  ROUND(RAND() * 100, 2) AS fill_rate,
+  ROUND(10 + RAND() * 100, 2) AS latency_ms
+FROM delivery_records;
+
+-- TABLE 4: ad_spend (Cost Data)
+CREATE OR REPLACE TABLE `project.dataset.ad_spend` AS
+WITH spend_records AS (
+  SELECT 
+    campaign_id,
+    date,
+    platform
+  FROM UNNEST([
+    STRUCT('camp_001' AS campaign_id, 'Google Ads' AS platform),
+    STRUCT('camp_002', 'DV360'),
+    STRUCT('camp_003', 'Facebook Ads'),
+    STRUCT('camp_004', 'Google Ads'),
+    STRUCT('camp_005', 'DV360'),
+    STRUCT('camp_006', 'YouTube'),
+    STRUCT('camp_007', 'Google Ads'),
+    STRUCT('camp_008', 'DV360'),
+    STRUCT('camp_009', 'Facebook Ads'),
+    STRUCT('camp_010', 'Google Ads')
+  ]),
+  UNNEST(GENERATE_ARRAY(1, 90)) AS day_offset
+)
+SELECT 
+  GENERATE_UUID() AS spend_id,
+  campaign_id,
+  DATE_SUB(CURRENT_DATE(), INTERVAL day_offset DAY) AS date,
+  platform,
+  ROUND(50 + RAND() * 1000, 2) AS daily_spend,
+  CASE WHEN RAND() > 0.95 THEN NULL ELSE ROUND(20 + RAND() * 500, 2) END AS daily_budget,
+  ROUND(0.5 + RAND() * 5, 2) AS avg_cpc,
+  ROUND(5 + RAND() * 50, 2) AS avg_cpm
+FROM spend_records
+WHERE RAND() > 0.05;  -- 95% data availability
+
+-- TABLE 5: impressions (Impression-Level Data)
+CREATE OR REPLACE TABLE `project.dataset.impressions` AS
+WITH impression_base AS (
+  SELECT 
+    campaign_id,
+    ad_format,
+    device_type
+  FROM UNNEST([
+    STRUCT('camp_001' AS campaign_id, 'Banner' AS ad_format, 'Desktop' AS device_type),
+    STRUCT('camp_002', 'Video', 'Mobile'),
+    STRUCT('camp_003', 'Native', 'Tablet'),
+    STRUCT('camp_005', 'Interstitial', 'Mobile'),
+    STRUCT('camp_006', 'Video', 'Desktop'),
+    STRUCT('camp_007', 'Banner', 'Mobile'),
+    STRUCT('camp_009', 'Video', 'Mobile'),
+    STRUCT('camp_010', 'Banner', 'Tablet')
+  ]),
+  UNNEST(GENERATE_ARRAY(1, 250)) AS record_num
+)
+SELECT 
+  GENERATE_UUID() AS impression_id,
+  campaign_id,
+  ad_format,
+  device_type,
+  TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL CAST(RAND() * 2160 AS INT64) HOUR) AS impression_timestamp,
+  CAST(RAND() > 0.98 AS BOOL) AS is_clicked,
+  CAST(RAND() > 0.995 AS BOOL) AS is_converted,
+  ROUND(0.1 + RAND() * 2, 2) AS bid_price,
+  ROUND(0.05 + RAND() * 1.5, 2) AS win_price,
+  CASE 
+    WHEN RAND() < 0.4 THEN 'top'
+    WHEN RAND() < 0.7 THEN 'middle'
+    ELSE 'bottom'
+  END AS page_position,
+  CASE 
+    WHEN RAND() < 0.6 THEN 'organic'
+    WHEN RAND() < 0.85 THEN 'paid_search'
+    ELSE 'social'
+  END AS traffic_source
+FROM impression_base;
+
+-- ============================================
+-- DATA VALIDATION QUERIES
+-- ============================================
+
+-- Check record counts
+SELECT 'ads_txt' AS table_name, COUNT(*) AS row_count FROM `project.dataset.ads_txt`
+UNION ALL
+SELECT 'campaign_performance', COUNT(*) FROM `project.dataset.campaign_performance`
+UNION ALL
+SELECT 'programmatic_delivery', COUNT(*) FROM `project.dataset.programmatic_delivery`
+UNION ALL
+SELECT 'ad_spend', COUNT(*) FROM `project.dataset.ad_spend`
+UNION ALL
+SELECT 'impressions', COUNT(*) FROM `project.dataset.impressions`;
+
+-- T-SQL Note: Use same UNION ALL pattern, just adjust table names and schema
