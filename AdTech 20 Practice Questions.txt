@@ -1,0 +1,723 @@
+-- ============================================
+-- AdTech SQL Practice - 20 Essential Queries
+-- Platform: BigQuery (with T-SQL alternatives)
+-- Covers: JOINs, Aggregations, CTEs, Window Functions, Date Operations
+-- ============================================
+
+-- ============================================
+-- SECTION 1: BASIC FILTERING & AGGREGATION
+-- ============================================
+
+-- Q1: Retrieve all unique ad IDs from the ads_txt table
+-- Concept: DISTINCT, Basic SELECT
+SELECT DISTINCT ad_id
+FROM `project.dataset.ads_txt`
+WHERE status = 'active';
+
+/* Explanation:
+- DISTINCT removes duplicate ad_ids
+- Filter for active ads only to get currently valid inventory
+- T-SQL: Identical syntax
+*/
+
+-- Q2: Calculate total revenue per campaign
+-- Concept: GROUP BY, SUM, Aggregation
+SELECT 
+  campaign_id,
+  campaign_name,
+  SUM(revenue) AS total_revenue,
+  SUM(cost) AS total_cost,
+  SUM(revenue) - SUM(cost) AS profit,
+  COUNT(DISTINCT performance_date) AS days_active
+FROM `project.dataset.campaign_performance`
+GROUP BY campaign_id, campaign_name
+ORDER BY total_revenue DESC;
+
+/* Explanation:
+- GROUP BY consolidates rows by campaign
+- Multiple SUM() aggregations for different metrics
+- Calculated field (profit) using aggregated values
+- COUNT(DISTINCT) shows unique days with activity
+- T-SQL: Identical syntax
+*/
+
+-- ============================================
+-- SECTION 2: JOINS & RELATIONSHIPS
+-- ============================================
+
+-- Q3: Join programmatic_delivery and campaign_performance to analyze delivery efficiency
+-- Concept: INNER JOIN, Calculated Metrics
+SELECT 
+  pd.campaign_id,
+  cp.campaign_name,
+  pd.date,
+  pd.delivery_status,
+  SUM(pd.impressions_delivered) AS total_delivered,
+  SUM(cp.impressions) AS total_impressions,
+  ROUND(SUM(pd.impressions_delivered) * 100.0 / NULLIF(SUM(cp.impressions), 0), 2) AS delivery_rate_pct
+FROM `project.dataset.programmatic_delivery` pd
+INNER JOIN `project.dataset.campaign_performance` cp
+  ON pd.campaign_id = cp.campaign_id 
+  AND pd.date = cp.performance_date
+GROUP BY pd.campaign_id, cp.campaign_name, pd.date, pd.delivery_status
+HAVING delivery_rate_pct < 80  -- Flag underperforming deliveries
+ORDER BY delivery_rate_pct ASC;
+
+/* Explanation:
+- INNER JOIN on both campaign_id AND date for precise matching
+- NULLIF prevents division by zero errors
+- HAVING filters aggregated results (vs WHERE for row-level)
+- Identifies campaigns with <80% delivery efficiency
+- T-SQL: Use ISNULL instead of NULLIF pattern: ISNULL(SUM(cp.impressions), 1)
+*/
+
+-- Q4: Multi-table JOIN combining delivery, performance, and spend data
+-- Concept: Multiple JOINs, Complex Analysis
+SELECT 
+  cp.campaign_id,
+  cp.campaign_name,
+  cp.campaign_type,
+  COUNT(DISTINCT pd.delivery_id) AS delivery_records,
+  SUM(cp.impressions) AS total_impressions,
+  SUM(cp.clicks) AS total_clicks,
+  SUM(cp.conversions) AS total_conversions,
+  SUM(asp.daily_spend) AS total_spend,
+  SUM(cp.revenue) AS total_revenue,
+  ROUND(SUM(cp.clicks) * 100.0 / NULLIF(SUM(cp.impressions), 0), 2) AS ctr_pct,
+  ROUND(SUM(cp.revenue) / NULLIF(SUM(asp.daily_spend), 0), 2) AS roas
+FROM `project.dataset.campaign_performance` cp
+LEFT JOIN `project.dataset.programmatic_delivery` pd
+  ON cp.campaign_id = pd.campaign_id 
+  AND cp.performance_date = pd.date
+LEFT JOIN `project.dataset.ad_spend` asp
+  ON cp.campaign_id = asp.campaign_id 
+  AND cp.performance_date = asp.date
+GROUP BY cp.campaign_id, cp.campaign_name, cp.campaign_type
+ORDER BY roas DESC;
+
+/* Explanation:
+- LEFT JOINs preserve all campaign_performance records
+- Multiple date-based joins ensure temporal alignment
+- CTR (Click-Through Rate) = clicks / impressions * 100
+- ROAS (Return on Ad Spend) = revenue / spend
+- T-SQL: Identical syntax
+*/
+
+-- ============================================
+-- SECTION 3: CTEs (Common Table Expressions)
+-- ============================================
+
+-- Q5: Use CTE to find top 10 highest-performing impressions
+-- Concept: WITH clause, Window Functions, Ranking
+WITH impression_metrics AS (
+  SELECT 
+    impression_id,
+    campaign_id,
+    ad_format,
+    device_type,
+    impression_timestamp,
+    is_clicked,
+    is_converted,
+    bid_price,
+    win_price,
+    (bid_price - win_price) AS bid_efficiency,
+    CASE 
+      WHEN is_converted THEN 'converted'
+      WHEN is_clicked THEN 'clicked'
+      ELSE 'viewed'
+    END AS engagement_level,
+    ROW_NUMBER() OVER (PARTITION BY campaign_id ORDER BY 
+      CASE WHEN is_converted THEN 3 WHEN is_clicked THEN 2 ELSE 1 END DESC,
+      (bid_price - win_price) DESC) AS performance_rank
+  FROM `project.dataset.impressions`
+)
+SELECT 
+  impression_id,
+  campaign_id,
+  ad_format,
+  device_type,
+  engagement_level,
+  bid_efficiency,
+  performance_rank
+FROM impression_metrics
+WHERE performance_rank <= 10
+ORDER BY campaign_id, performance_rank;
+
+/* Explanation:
+- CTE breaks complex query into readable steps
+- Window function ROW_NUMBER() ranks within each campaign
+- PARTITION BY creates separate rankings per campaign
+- Custom sort logic: conversions > clicks > views, then by efficiency
+- Returns top 10 impressions per campaign
+- T-SQL: Identical syntax for CTEs and window functions
+*/
+
+-- Q6: Multi-level CTE for complex campaign analysis
+-- Concept: Nested CTEs, Data Pipeline Pattern
+WITH daily_metrics AS (
+  -- Step 1: Calculate daily metrics
+  SELECT 
+    campaign_id,
+    performance_date,
+    SUM(impressions) AS impressions,
+    SUM(clicks) AS clicks,
+    SUM(conversions) AS conversions,
+    SUM(revenue) AS revenue,
+    SUM(cost) AS cost
+  FROM `project.dataset.campaign_performance`
+  WHERE performance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+  GROUP BY campaign_id, performance_date
+),
+campaign_summary AS (
+  -- Step 2: Aggregate to campaign level
+  SELECT 
+    campaign_id,
+    AVG(impressions) AS avg_daily_impressions,
+    AVG(clicks) AS avg_daily_clicks,
+    SUM(revenue) AS total_revenue,
+    SUM(cost) AS total_cost,
+    ROUND(SUM(clicks) * 100.0 / NULLIF(SUM(impressions), 0), 2) AS overall_ctr,
+    ROUND(SUM(conversions) * 100.0 / NULLIF(SUM(clicks), 0), 2) AS conversion_rate
+  FROM daily_metrics
+  GROUP BY campaign_id
+)
+SELECT 
+  cs.*,
+  CASE 
+    WHEN cs.overall_ctr >= 2.0 AND cs.conversion_rate >= 5.0 THEN 'Excellent'
+    WHEN cs.overall_ctr >= 1.0 AND cs.conversion_rate >= 3.0 THEN 'Good'
+    WHEN cs.overall_ctr >= 0.5 AND cs.conversion_rate >= 1.0 THEN 'Average'
+    ELSE 'Needs Improvement'
+  END AS performance_tier
+FROM campaign_summary cs
+ORDER BY performance_tier, total_revenue DESC;
+
+/* Explanation:
+- First CTE: Aggregates raw data to daily level (last 30 days)
+- Second CTE: Further aggregates to campaign level with KPIs
+- Final SELECT: Adds business logic (performance tiers)
+- This pattern mimics data pipeline architecture
+- T-SQL: Identical syntax
+*/
+
+-- ============================================
+-- SECTION 4: SUBQUERIES & EXISTS
+-- ============================================
+
+-- Q7: Find campaigns with zero revenue using subquery
+-- Concept: NOT EXISTS, Subquery Filtering
+SELECT 
+  campaign_id,
+  campaign_name,
+  status,
+  campaign_type
+FROM `project.dataset.campaign_performance`
+WHERE NOT EXISTS (
+  SELECT 1 
+  FROM `project.dataset.campaign_performance` cp2
+  WHERE cp2.campaign_id = campaign_performance.campaign_id
+    AND cp2.revenue > 0
+)
+  AND performance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+GROUP BY campaign_id, campaign_name, status, campaign_type;
+
+/* Explanation:
+- NOT EXISTS checks for absence of revenue-generating records
+- More efficient than LEFT JOIN + NULL check for existence testing
+- Subquery correlates with outer query via campaign_id
+- Groups to get distinct campaigns (since NOT EXISTS could match multiple rows)
+- T-SQL: Identical syntax
+*/
+
+-- Q8: Alternative approach using IN/NOT IN
+-- Concept: Subquery with NOT IN
+SELECT DISTINCT
+  campaign_id,
+  campaign_name,
+  status
+FROM `project.dataset.campaign_performance`
+WHERE campaign_id NOT IN (
+  SELECT campaign_id
+  FROM `project.dataset.campaign_performance`
+  WHERE revenue > 0
+    AND performance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+);
+
+/* Explanation:
+- NOT IN creates a list of campaigns with revenue
+- Then excludes those from results
+- CAUTION: NOT IN with NULLs can produce unexpected results
+- NOT EXISTS is generally preferred for performance
+- T-SQL: Use DATEADD(DAY, -30, GETDATE()) for date math
+*/
+
+-- ============================================
+-- SECTION 5: TIME-SERIES ANALYSIS
+-- ============================================
+
+-- Q9: Analyze ad performance trends over time with moving averages
+-- Concept: Window Functions, Date Operations, Moving Averages
+SELECT 
+  performance_date,
+  campaign_id,
+  impressions,
+  clicks,
+  revenue,
+  -- 7-day moving averages
+  AVG(impressions) OVER (
+    PARTITION BY campaign_id 
+    ORDER BY performance_date 
+    ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+  ) AS impressions_7day_ma,
+  AVG(clicks) OVER (
+    PARTITION BY campaign_id 
+    ORDER BY performance_date 
+    ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+  ) AS clicks_7day_ma,
+  -- Day-over-day change
+  impressions - LAG(impressions) OVER (
+    PARTITION BY campaign_id 
+    ORDER BY performance_date
+  ) AS impressions_change,
+  ROUND((impressions - LAG(impressions) OVER (
+    PARTITION BY campaign_id 
+    ORDER BY performance_date
+  )) * 100.0 / NULLIF(LAG(impressions) OVER (
+    PARTITION BY campaign_id 
+    ORDER BY performance_date
+  ), 0), 2) AS impressions_pct_change
+FROM `project.dataset.campaign_performance`
+WHERE performance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 60 DAY)
+ORDER BY campaign_id, performance_date;
+
+/* Explanation:
+- ROWS BETWEEN creates sliding window for moving averages
+- LAG() accesses previous row's value for comparison
+- PARTITION BY ensures calculations stay within each campaign
+- ORDER BY defines the sequence for window operations
+- Useful for identifying trends and anomalies
+- T-SQL: Identical window function syntax
+*/
+
+-- Q10: Identify declining performance campaigns
+-- Concept: Window Functions, Trend Detection
+WITH weekly_performance AS (
+  SELECT 
+    campaign_id,
+    DATE_TRUNC(performance_date, WEEK) AS week_start,
+    SUM(revenue) AS weekly_revenue,
+    SUM(clicks) AS weekly_clicks
+  FROM `project.dataset.campaign_performance`
+  WHERE performance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 12 WEEK)
+  GROUP BY campaign_id, week_start
+),
+trend_analysis AS (
+  SELECT 
+    campaign_id,
+    week_start,
+    weekly_revenue,
+    LAG(weekly_revenue, 1) OVER (PARTITION BY campaign_id ORDER BY week_start) AS prev_week_revenue,
+    LAG(weekly_revenue, 2) OVER (PARTITION BY campaign_id ORDER BY week_start) AS two_weeks_ago_revenue,
+    LAG(weekly_revenue, 3) OVER (PARTITION BY campaign_id ORDER BY week_start) AS three_weeks_ago_revenue
+  FROM weekly_performance
+)
+SELECT 
+  campaign_id,
+  week_start,
+  weekly_revenue,
+  prev_week_revenue,
+  two_weeks_ago_revenue,
+  three_weeks_ago_revenue
+FROM trend_analysis
+WHERE weekly_revenue < prev_week_revenue
+  AND prev_week_revenue < two_weeks_ago_revenue
+  AND two_weeks_ago_revenue < three_weeks_ago_revenue
+  AND week_start >= DATE_SUB(CURRENT_DATE(), INTERVAL 4 WEEK)
+ORDER BY campaign_id, week_start DESC;
+
+/* Explanation:
+- DATE_TRUNC aggregates to weekly level
+- Multiple LAG() functions look back multiple periods
+- Final WHERE identifies 3+ consecutive weeks of decline
+- Early warning system for performance issues
+- T-SQL: Use DATEPART(WEEK, performance_date) for weekly grouping
+*/
+
+-- ============================================
+-- SECTION 6: DATA QUALITY & ANOMALY DETECTION
+-- ============================================
+
+-- Q11: Handle missing values in ad_spend column
+-- Concept: NULL Handling, Data Imputation
+SELECT 
+  campaign_id,
+  date,
+  daily_spend,
+  daily_budget,
+  -- Multiple strategies for handling NULLs
+  COALESCE(daily_budget, daily_spend * 1.2) AS budget_filled,
+  IFNULL(daily_budget, 0) AS budget_zero_filled,
+  CASE 
+    WHEN daily_budget IS NULL THEN 'Missing'
+    WHEN daily_budget < daily_spend THEN 'Over Budget'
+    ELSE 'Within Budget'
+  END AS budget_status,
+  -- Calculate spend as % of budget, handling NULLs
+  ROUND(daily_spend * 100.0 / NULLIF(daily_budget, 0), 2) AS spend_pct_of_budget
+FROM `project.dataset.ad_spend`
+WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+ORDER BY date DESC, campaign_id;
+
+/* Explanation:
+- COALESCE returns first non-NULL value (fallback pattern)
+- IFNULL is BigQuery-specific (simpler than COALESCE for 2 values)
+- CASE WHEN provides complex conditional logic
+- NULLIF prevents division by zero
+- T-SQL: Use ISNULL instead of IFNULL, COALESCE works the same
+*/
+
+-- Q12: Identify anomalies in ad delivery rates
+-- Concept: Statistical Analysis, Outlier Detection
+WITH delivery_stats AS (
+  SELECT 
+    campaign_id,
+    geo_region,
+    device_type,
+    AVG(fill_rate) AS avg_fill_rate,
+    STDDEV(fill_rate) AS stddev_fill_rate,
+    MIN(fill_rate) AS min_fill_rate,
+    MAX(fill_rate) AS max_fill_rate,
+    COUNT(*) AS sample_size
+  FROM `project.dataset.programmatic_delivery`
+  WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+    AND delivery_status = 'successful'
+  GROUP BY campaign_id, geo_region, device_type
+  HAVING COUNT(*) >= 10  -- Ensure sufficient sample size
+),
+anomaly_detection AS (
+  SELECT 
+    pd.*,
+    ds.avg_fill_rate,
+    ds.stddev_fill_rate,
+    -- Z-score calculation
+    (pd.fill_rate - ds.avg_fill_rate) / NULLIF(ds.stddev_fill_rate, 0) AS z_score
+  FROM `project.dataset.programmatic_delivery` pd
+  INNER JOIN delivery_stats ds
+    ON pd.campaign_id = ds.campaign_id
+    AND pd.geo_region = ds.geo_region
+    AND pd.device_type = ds.device_type
+  WHERE pd.date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+)
+SELECT 
+  delivery_id,
+  campaign_id,
+  geo_region,
+  device_type,
+  date,
+  fill_rate,
+  avg_fill_rate,
+  z_score,
+  CASE 
+    WHEN ABS(z_score) > 3 THEN 'Extreme Anomaly'
+    WHEN ABS(z_score) > 2 THEN 'Significant Anomaly'
+    WHEN ABS(z_score) > 1.5 THEN 'Mild Anomaly'
+    ELSE 'Normal'
+  END AS anomaly_severity
+FROM anomaly_detection
+WHERE ABS(z_score) > 1.5
+ORDER BY ABS(z_score) DESC;
+
+/* Explanation:
+- First CTE: Calculates statistical baseline (mean, std dev)
+- Second CTE: Computes z-scores for recent data
+- Z-score shows how many standard deviations from mean
+- Flags outliers using statistical thresholds
+- Real-world application: monitors delivery quality
+- T-SQL: Use STDEV instead of STDDEV
+*/
+
+-- ============================================
+-- SECTION 7: ADVANCED AGGREGATIONS
+-- ============================================
+
+-- Q13: Calculate metrics per ad group with rollups
+-- Concept: GROUP BY with aggregations, GROUPING SETS
+SELECT 
+  campaign_type,
+  COALESCE(ad_format, 'ALL FORMATS') AS ad_format,
+  COALESCE(device_type, 'ALL DEVICES') AS device_type,
+  COUNT(DISTINCT pd.delivery_id) AS total_deliveries,
+  SUM(pd.impressions_delivered) AS total_impressions,
+  AVG(pd.fill_rate) AS avg_fill_rate,
+  ROUND(AVG(pd.latency_ms), 2) AS avg_latency_ms
+FROM `project.dataset.programmatic_delivery` pd
+INNER JOIN `project.dataset.campaign_performance` cp
+  ON pd.campaign_id = cp.campaign_id
+WHERE pd.date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+GROUP BY campaign_type, ad_format, device_type
+ORDER BY campaign_type, ad_format, device_type;
+
+/* Explanation:
+- Groups by multiple dimensions
+- COALESCE handles NULLs in display
+- Multiple aggregations: COUNT, SUM, AVG
+- Provides granular view of performance
+- T-SQL: Can use ROLLUP or GROUPING SETS for subtotals
+*/
+
+-- Q14: Find top 5 ad formats by click-through rate
+-- Concept: Ranking, Filtering, Performance Analysis
+WITH format_performance AS (
+  SELECT 
+    ad_format,
+    SUM(clicks) AS total_clicks,
+    SUM(impressions) AS total_impressions,
+    ROUND(SUM(clicks) * 100.0 / NULLIF(SUM(impressions), 0), 2) AS ctr,
+    SUM(conversions) AS total_conversions,
+    ROUND(SUM(conversions) * 100.0 / NULLIF(SUM(clicks), 0), 2) AS conversion_rate,
+    COUNT(DISTINCT campaign_id) AS campaigns_count
+  FROM `project.dataset.campaign_performance` cp
+  INNER JOIN `project.dataset.programmatic_delivery` pd
+    ON cp.campaign_id = pd.campaign_id 
+    AND cp.performance_date = pd.date
+  WHERE cp.performance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+  GROUP BY ad_format
+  HAVING total_impressions >= 10000  -- Statistical significance threshold
+)
+SELECT 
+  ad_format,
+  total_clicks,
+  total_impressions,
+  ctr,
+  conversion_rate,
+  campaigns_count,
+  RANK() OVER (ORDER BY ctr DESC) AS ctr_rank
+FROM format_performance
+ORDER BY ctr DESC
+LIMIT 5;
+
+/* Explanation:
+- CTE aggregates performance by ad format
+- HAVING filters for statistical significance
+- RANK() provides ranking (ties get same rank)
+- LIMIT returns top 5 performers
+- Business insight: identifies best-performing formats
+- T-SQL: Use TOP 5 instead of LIMIT
+*/
+
+-- ============================================
+-- SECTION 8: COMPLEX BUSINESS LOGIC
+-- ============================================
+
+-- Q15: Calculate average revenue per user (ARPU) by campaign
+-- Concept: Nested Aggregations, User-level Metrics
+WITH user_revenue AS (
+  SELECT 
+    cp.campaign_id,
+    cp.campaign_name,
+    -- Simulate user_id from impression data
+    i.impression_id AS user_proxy,
+    SUM(cp.revenue) AS user_total_revenue
+  FROM `project.dataset.campaign_performance` cp
+  INNER JOIN `project.dataset.impressions` i
+    ON cp.campaign_id = i.campaign_id
+  WHERE cp.performance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+    AND i.is_converted = TRUE
+  GROUP BY cp.campaign_id, cp.campaign_name, i.impression_id
+)
+SELECT 
+  campaign_id,
+  campaign_name,
+  COUNT(DISTINCT user_proxy) AS unique_users,
+  SUM(user_total_revenue) AS total_campaign_revenue,
+  ROUND(SUM(user_total_revenue) / NULLIF(COUNT(DISTINCT user_proxy), 0), 2) AS arpu,
+  ROUND(AVG(user_total_revenue), 2) AS avg_user_revenue,
+  MIN(user_total_revenue) AS min_user_revenue,
+  MAX(user_total_revenue) AS max_user_revenue
+FROM user_revenue
+GROUP BY campaign_id, campaign_name
+ORDER BY arpu DESC;
+
+/* Explanation:
+- First CTE: Aggregates revenue per user (using impression as proxy)
+- Final query: Calculates ARPU and distribution metrics
+- ARPU = Total Revenue / Unique Users
+- Shows revenue concentration and user value
+- T-SQL: Identical syntax
+*/
+
+-- Q16: Calculate total cost per click (CPC) for each campaign
+-- Concept: Cost Efficiency, ROI Metrics
+SELECT 
+  cp.campaign_id,
+  cp.campaign_name,
+  cp.campaign_type,
+  SUM(asp.daily_spend) AS total_spend,
+  SUM(cp.clicks) AS total_clicks,
+  SUM(cp.conversions) AS total_conversions,
+  SUM(cp.revenue) AS total_revenue,
+  -- Cost metrics
+  ROUND(SUM(asp.daily_spend) / NULLIF(SUM(cp.clicks), 0), 2) AS actual_cpc,
+  ROUND(AVG(asp.avg_cpc), 2) AS platform_reported_cpc,
+  ROUND(SUM(asp.daily_spend) / NULLIF(SUM(cp.conversions), 0), 2) AS cost_per_conversion,
+  -- Efficiency metrics
+  ROUND(SUM(cp.revenue) / NULLIF(SUM(asp.daily_spend), 0), 2) AS roas,
+  ROUND((SUM(cp.revenue) - SUM(asp.daily_spend)) / NULLIF(SUM(asp.daily_spend), 0) * 100, 2) AS roi_pct
+FROM `project.dataset.campaign_performance` cp
+INNER JOIN `project.dataset.ad_spend` asp
+  ON cp.campaign_id = asp.campaign_id 
+  AND cp.performance_date = asp.date
+WHERE cp.performance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+GROUP BY cp.campaign_id, cp.campaign_name, cp.campaign_type
+HAVING total_clicks > 100  -- Filter for meaningful data
+ORDER BY roas DESC;
+
+/* Explanation:
+- Joins cost and performance data
+- Actual CPC = total_spend / total_clicks
+- Cost per conversion = total_spend / conversions
+- ROAS = revenue / spend (should be > 1.0 for profitability)
+- ROI% = (revenue - spend) / spend * 100
+- T-SQL: Identical syntax
+*/
+
+-- ============================================
+-- SECTION 9: DATA TRANSFORMATION & PIVOTING
+-- ============================================
+
+-- Q17: Pivot delivery status by region
+-- Concept: CASE WHEN for pivoting, Cross-tabulation
+SELECT 
+  geo_region,
+  COUNT(*) AS total_deliveries,
+  SUM(CASE WHEN delivery_status = 'successful' THEN 1 ELSE 0 END) AS successful,
+  SUM(CASE WHEN delivery_status = 'failed' THEN 1 ELSE 0 END) AS failed,
+  SUM(CASE WHEN delivery_status = 'partial' THEN 1 ELSE 0 END) AS partial,
+  ROUND(SUM(CASE WHEN delivery_status = 'successful' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS success_rate_pct,
+  SUM(impressions_delivered) AS total_impressions,
+  AVG(fill_rate) AS avg_fill_rate
+FROM `project.dataset.programmatic_delivery`
+WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+GROUP BY geo_region
+ORDER BY success_rate_pct DESC;
+
+/* Explanation:
+- CASE WHEN creates columns from row values (pivoting)
+- Each CASE generates a count for specific status
+- Calculates success rate as percentage
+- Groups by geography for regional analysis
+- T-SQL: Can also use PIVOT operator for cleaner syntax
+*/
+
+-- ============================================
+-- SECTION 10: OPTIMIZATION & BEST PRACTICES
+-- ============================================
+
+-- Q18: Optimized query with filtering and partitioning
+-- Concept: Query Optimization, Partition Pruning
+SELECT 
+  campaign_id,
+  campaign_type,
+  DATE_TRUNC(performance_date, MONTH) AS month,
+  SUM(impressions) AS monthly_impressions,
+  SUM(clicks) AS monthly_clicks,
+  SUM(revenue) AS monthly_revenue,
+  ROUND(SUM(clicks) * 100.0 / NULLIF(SUM(impressions), 0), 2) AS monthly_ctr
+FROM `project.dataset.campaign_performance`
+WHERE performance_date >= '2024-01-01'  -- Partition pruning
+  AND performance_date < '2025-01-01'
+  AND status = 'active'  -- Early filtering
+GROUP BY campaign_id, campaign_type, month
+HAVING monthly_impressions >= 1000  -- Post-aggregation filter
+ORDER BY month DESC, monthly_revenue DESC;
+
+/* Explanation:
+- WHERE clause filters early (before aggregation)
+- Date range helps BigQuery use partition pruning
+- HAVING filters after aggregation (for aggregate conditions)
+- DATE_TRUNC aggregates to month level efficiently
+- Optimization: Filter → Aggregate → Sort
+- T-SQL: Use DATEPART(MONTH, performance_date) or EOMONTH()
+*/
+
+-- Q19: Identify underperforming ad groups with benchmark comparison
+-- Concept: Self-join, Benchmark Analysis, Performance Comparison
+WITH campaign_benchmarks AS (
+  SELECT 
+    campaign_type,
+    AVG(impressions) AS avg_impressions,
+    AVG(clicks) AS avg_clicks,
+    ROUND(AVG(clicks * 100.0 / NULLIF(impressions, 0)), 2) AS avg_ctr,
+    STDDEV(clicks * 100.0 / NULLIF(impressions, 0)) AS stddev_ctr
+  FROM `project.dataset.campaign_performance`
+  WHERE performance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+    AND impressions > 0
+  GROUP BY campaign_type
+),
+campaign_scores AS (
+  SELECT 
+    cp.campaign_id,
+    cp.campaign_name,
+    cp.campaign_type,
+    SUM(cp.impressions) AS total_impressions,
+    SUM(cp.clicks) AS total_clicks,
+    ROUND(SUM(cp.clicks) * 100.0 / NULLIF(SUM(cp.impressions), 0), 2) AS actual_ctr,
+    cb.avg_ctr AS benchmark_ctr,
+    ROUND((SUM(cp.clicks) * 100.0 / NULLIF(SUM(cp.impressions), 0)) - cb.avg_ctr, 2) AS ctr_vs_benchmark
+  FROM `project.dataset.campaign_performance` cp
+  INNER JOIN campaign_benchmarks cb
+    ON cp.campaign_type = cb.campaign_type
+  WHERE cp.performance_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+  GROUP BY cp.campaign_id, cp.campaign_name, cp.campaign_type, cb.avg_ctr
+)
+SELECT 
+  campaign_id,
+  campaign_name,
+  campaign_type,
+  total_impressions,
+  total_clicks,
+  actual_ctr,
+  benchmark_ctr,
+  ctr_vs_benchmark,
+  CASE 
+    WHEN ctr_vs_benchmark < -0.5 THEN 'Critical Underperformance'
+    WHEN ctr_vs_benchmark < -0.2 THEN 'Underperforming'
+    WHEN ctr_vs_benchmark > 0.5 THEN 'Outperforming'
+    ELSE 'Average'
+  END AS performance_status
+FROM campaign_scores
+WHERE ctr_vs_benchmark < 0  -- Only underperformers
+ORDER BY ctr_vs_benchmark ASC;
+
+/* Explanation:
+- First CTE: Calculates benchmarks by campaign type
+- Second CTE: Compares each campaign to its type's benchmark
+- Self-join pattern for peer comparison
+- Identifies campaigns needing optimization
+- Real-world use: prioritize campaigns for improvement
+- T-SQL: Identical syntax
+*/
+
+-- Q20: Comprehensive campaign health dashboard query
+-- Concept: End-to-end Analysis, Business Intelligence
+WITH campaign_metrics AS (
+  SELECT 
+    cp.campaign_id,
+    cp.campaign_name,
+    cp.campaign_type,
+    cp.status,
+    COUNT(DISTINCT cp.performance_date) AS days_active,
+    SUM(cp.impressions) AS total_impressions,
+    SUM(cp.clicks) AS total_clicks,
+    SUM(cp.conversions) AS total_conversions,
+    SUM(cp.revenue) AS total_revenue,
+    AVG(cp.quality_score) AS avg_quality_score,
+    SUM(asp.daily_spend) AS total_spend,
+    COUNT(DISTINCT pd.geo_region) AS regions_reached,
+    COUNT(DISTINCT pd.device_type) AS device_types
+  FROM `project.dataset.campaign_performance` cp
+  LEFT JOIN `project.dataset.ad_spend` asp
+    ON cp.campaign_id = asp.campaign_id 
+    AND cp.performance_date = asp.date
+  LEFT JOIN `project.dataset.programmatic_delivery` pd
+    ON cp.campaign_id = pd.campaign_id
